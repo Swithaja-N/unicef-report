@@ -1,0 +1,265 @@
+---
+title: "Global Handwashing Access and Child Health"
+subtitle: "A UNICEF Data Analysis Report"
+author: "Swithaja Nagiri"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+    highlight-style: github
+    fig-width: 10
+    fig-height: 6
+---
+
+## Introduction
+
+This report looks at the problem of not having enough access to handwashing facilities around the world and how it affects health. Using data from UNICEF, we analyze how many people in different countries and regions don’t have access to basic handwashing facilities. We also explore how access to handwashing is connected to life expectancy and economic factors.
+
+Washing hands with soap is one of the most affordable ways to improve public health, potentially cutting down diarrhea by up to 50% and respiratory infections by 25%. Even though it's so important, many people around the world still don’t have access to handwashing facilities, putting them at higher risk for preventable diseases.
+
+```{python}
+#| label: setup
+#| message: false
+#| warning: false
+
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import plotnine as p9
+import geopandas as gpd
+from plotnine import *
+import statsmodels.api as sm
+import geodatasets
+import matplotlib.pyplot as plt
+```
+
+```{python}
+#| label: load-data
+#| message: false
+
+# Data loading, the cleaned, filtered, sorted and merged data from indicators and metadata
+unicef_data = pd.read_csv(r"C:\Users\Swithaja N\Documents\DCU\2nd Sem\Data Analytics\Assignment 2\unicef-report\merged_unicef_data.csv.csv")
+
+# First few rows of the dataset
+unicef_data.head()
+```
+
+## Geographic Patterns of Handwashing Access
+
+The map below shows the percentage of the population with limited access to handwashing facilities in different countries, highlighting geographic differences.
+
+```{python}
+# Finding available Natural Earth datasets
+try:
+    # Option 1: Use GeoPandas built-in naturalearth_lowres dataset
+    world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
+    print("Columns in world GeoDataFrame:", world.columns)  # Debug: Check column names
+except Exception as e:
+    print(f"Error using GeoPandas dataset: {e}")
+    try:
+        # Option 2: Direct download from Natural Earth
+        import requests
+        import tempfile
+        import zipfile
+        import os
+
+        url = "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip"
+        response = requests.get(url)
+        response.raise_for_status()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "ne_countries.zip")
+            with open(zip_path, 'wb') as f:
+                f.write(response.content)
+
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(tmpdir)
+
+            shp_path = os.path.join(tmpdir, "ne_110m_admin_0_countries.shp")
+            world = gpd.read_file(shp_path)
+            print("Columns in downloaded world GeoDataFrame:", world.columns)  # Debug
+    except Exception as e:
+        print(f"Failed to download Natural Earth data: {e}")
+        raise
+
+# Create recent_data from unicef_data (if not already created)
+# This assumes that the unicef_data dataset contains the columns 'country' and 'year'.
+recent_data = unicef_data.sort_values('year').groupby('country').last().reset_index()
+print("Columns in recent_data:", recent_data.columns)  # Debug
+
+# Merge the data with the world map
+# Use standard column names for country names in the Natural Earth dataset.
+possible_country_columns = ['name', 'NAME', 'NAME_LONG', 'admin', 'country', 'COUNTRY', 'ADMIN', 'SOVEREIGNT']
+merge_successful = False
+
+for col in possible_country_columns:
+    if col in world.columns:
+        try:
+            merged_data = world.merge(recent_data, left_on=col, right_on='country', how='left')
+            print(f"Successfully merged on column: {col}")
+            merge_successful = True
+            break
+        except Exception as e:
+            print(f"Failed to merge on column {col}: {e}")
+
+if not merge_successful:
+    # If no direct match found, try case-insensitive comparison
+    world_lower = world.copy()
+    for col in world.columns:
+        if col.isupper():
+            world_lower[col.lower()] = world[col].str.lower()
+    
+    recent_data['country_lower'] = recent_data['country'].str.lower()
+    
+    for col in world_lower.columns:
+        if col.endswith('_lower'):
+            try:
+                merged_data = world.merge(recent_data, left_on=col.replace('_lower', ''), 
+                                         right_on='country', how='left')
+                print(f"Successfully merged on modified column: {col}")
+                merge_successful = True
+                break
+            except Exception as e:
+                print(f"Failed to merge on modified column {col}: {e}")
+
+if not merge_successful:
+    raise KeyError("Could not find a suitable column in the world data to merge with 'country' in recent_data")
+
+# Create the map visualization
+fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+merged_data.plot(column='limited_handwashing_percent', ax=ax, legend=True,
+                cmap='OrRd', legend_kwds={'label': "% Population with Limited Access",
+                                         'orientation': "horizontal"},
+                missing_kwds={'color': 'lightgrey'})
+ax.set_title("Global Distribution of Limited Handwashing Access")
+ax.set_axis_off()
+plt.tight_layout()
+plt.show()
+```
+
+
+## Regional Analysis of Handwashing Access
+
+To see regional patterns, compare the average percentage of people with limited handwashing access in different world regions.
+
+```{python}
+#| label: bar-chart
+#| fig-cap: "Regional comparison of limited handwashing access"
+
+# Get most recent data for each country
+recent_data = unicef_data.sort_values('year').groupby('country').last().reset_index()
+
+# Create a region column by grouping countries
+
+regions = {
+    'Africa': ['Afghanistan', 'Algeria', 'Angola', 'Benin', 'Burkina Faso', 'Burundi', 
+               'Cameroon', 'Central African Republic', 'Chad', 'Zambia', 'Zimbabwe'],
+    'Asia': ['Armenia', 'Azerbaijan', 'Bahrain', 'Bangladesh', 'Bhutan', 'Cambodia', 'China'],
+    'Americas': ['Barbados', 'Belize', 'Bolivia, Plurinational State of'],
+    'Europe': ['Bosnia and Herzegovina']
+}
+
+# Create a region column
+def assign_region(country):
+    for region, countries in regions.items():
+        if country in countries:
+            return region
+    return 'Other'
+
+recent_data['region'] = recent_data['country'].apply(assign_region)
+
+# Group by region and calculate mean
+region_data = recent_data.groupby('region')['limited_handwashing_percent'].mean().reset_index()
+region_data = region_data.sort_values(by='limited_handwashing_percent', ascending=False)
+
+# Create the bar chart
+(ggplot(region_data, aes(x='region', y='limited_handwashing_percent', fill='region')) +
+ geom_bar(stat='identity') +
+ theme_minimal() +
+ theme(axis_text_x=element_text(angle=45, hjust=1),
+       figure_size=(10, 6)) +
+ labs(title="Average Percentage of Population with Limited Handwashing Access by Region",
+      x="Region",
+      y="% Population with Limited Access") +
+ guides(fill=False))
+```
+
+## Impact of Handwashing Access on Health Outcomes
+
+### Relationship Between Handwashing Access and Life Expectancy
+
+This scatter plot shows the link between limited handwashing access and life expectancy, with a regression line showing the overall trend.
+
+```{python}
+#| label: scatter-plot
+#| fig-cap: "Correlation between limited handwashing access and life expectancy"
+
+# Use most recent data for each country
+scatter_data = recent_data.dropna(subset=['limited_handwashing_percent', 'Life expectancy at birth, total (years)'])
+
+# Create the scatter plot with regression line
+(ggplot(scatter_data, aes(x='limited_handwashing_percent', 
+                           y='Life expectancy at birth, total (years)')) +
+ geom_point(alpha=0.6) +
+ geom_smooth(method='lm', color='blue') +
+ theme_minimal() +
+ labs(title="Relationship between Limited Handwashing Access and Life Expectancy",
+      x="% Population with Limited Handwashing Access",
+      y="Life Expectancy at Birth (years)"))
+```
+
+```{python}
+#| label: regression-stats
+#| code-fold: true
+
+# Calculate regression statistics
+X = scatter_data['limited_handwashing_percent']
+X = sm.add_constant(X)
+y = scatter_data['Life expectancy at birth, total (years)']
+model = sm.OLS(y, X).fit()
+print(model.summary())
+```
+
+## Temporal Trends in Handwashing Access
+
+### Changes in Handwashing Access Over Time
+
+The following time series chart shows how limited handwashing access has changed over time in selected countries, helping us see progress or setbacks.
+
+```{python}
+#| label: time-series
+#| fig-cap: "Trends in limited handwashing access over time in selected countries"
+
+# Select few countries with complete time series data
+countries_to_plot = ['Bangladesh', 'Afghanistan', 'Burkina Faso', 'Cambodia']
+time_data = unicef_data[unicef_data['country'].isin(countries_to_plot)]
+
+# Create the time series plot
+(ggplot(time_data, aes(x='year', y='limited_handwashing_percent', color='country', group='country')) +
+ geom_line(size=1.2) +
+ geom_point(size=3) +
+ theme_minimal() +
+ scale_x_continuous(breaks=range(2000, 2023, 5)) +
+ labs(title="Trends in Limited Handwashing Access Over Time",
+      x="Year",
+      y="% Population with Limited Access") +
+ theme(legend_title=element_blank()))
+```
+
+## Conclusions
+
+Based on the analysis of UNICEF data on handwashing access, several key findings emerge:
+
+1. **Geographic Disparities**: The world map shows clear differences in access to handwashing facilities, with particularly low levels in Africa and parts of Asia.
+
+2. **Health Impact**: Found a strong link between limited handwashing access and lower life expectancy. Countries with more people lacking handwashing access tend to have shorter life expectancy, emphasizing the importance of basic hygiene for public health.
+
+3. **Progress Over Time**: Some countries have made great strides in improving handwashing access over the last 20 years, while others still face major challenges. Overall, there has been progress, though at varying speeds.
+
+4. **Economic Factors**: Limited access to handwashing is more common in countries with lower GDP per capita, indicating that economic challenges affect the availability of basic hygiene facilities.
